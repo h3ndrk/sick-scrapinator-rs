@@ -10,7 +10,7 @@ use nom::{
     branch::alt,
     bytes::streaming::{tag_no_case, take_till1, take_while1, take_while_m_n},
     character::{complete::space1, is_digit, is_space, streaming::hex_digit1},
-    combinator::map,
+    combinator::{map, value},
     multi::{count, length_count},
     sequence::{terminated, tuple},
     IResult,
@@ -31,14 +31,16 @@ impl Lidar {
             &mut socket,
             &mut unparsed,
             Application::Field,
-            ApplicationActivation::Disabled,
+            Activation::Disabled,
         );
         set_active_applications(
             &mut socket,
             &mut unparsed,
             Application::Ranging,
-            ApplicationActivation::Enabled,
+            Activation::Enabled,
         );
+        set_mean_filter(&mut socket, &mut unparsed, Activation::Enabled, 2);
+        set_median_filter(&mut socket, &mut unparsed, Activation::Enabled);
         run(&mut socket, &mut unparsed);
         wait_for_ready(&mut socket, &mut unparsed);
         Self { socket, unparsed }
@@ -106,7 +108,7 @@ fn set_active_applications(
     socket: &mut TcpStream,
     unparsed: &mut Vec<u8>,
     application: Application,
-    activation: ApplicationActivation,
+    activation: Activation,
 ) {
     Request::SetApplicationActivation(application, activation).write_to(socket);
     let response = get_next_response(socket, unparsed);
@@ -131,6 +133,29 @@ fn get_scan_data(socket: &mut TcpStream, unparsed: &mut Vec<u8>) -> Vec<usize> {
     let response = get_next_response(socket, unparsed);
     match response {
         Response::ScanData { values } => values,
+        _ => panic!("wut?!"),
+    }
+}
+
+fn set_mean_filter(
+    socket: &mut TcpStream,
+    unparsed: &mut Vec<u8>,
+    activation: Activation,
+    size: usize,
+) {
+    Request::SetMeanFilter(activation, size).write_to(socket);
+    let response = get_next_response(socket, unparsed);
+    match response {
+        Response::SetMeanFilter => return,
+        _ => panic!("wut?!"),
+    }
+}
+
+fn set_median_filter(socket: &mut TcpStream, unparsed: &mut Vec<u8>, activation: Activation) {
+    Request::SetMedianFilter(activation).write_to(socket);
+    let response = get_next_response(socket, unparsed);
+    match response {
+        Response::SetMedianFilter => return,
         _ => panic!("wut?!"),
     }
 }
@@ -245,6 +270,14 @@ fn response(input: &[u8]) -> IResult<&[u8], Response> {
             )),
             |(_, _, _, _, values, _, _)| Response::ScanData { values },
         ),
+        value(
+            Response::SetMeanFilter,
+            tag_no_case("\x02sWA LFPmeanfilter\x03"),
+        ),
+        value(
+            Response::SetMedianFilter,
+            tag_no_case("\x02sWA LFPmedianfilter\x03"),
+        ),
     ))(input)
 }
 
@@ -252,15 +285,17 @@ fn is_not_end(character: u8) -> bool {
     character != 0x03
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Request {
     DeviceState,
     SetAccessMode,
     StartMeasurement,
     StopMeasurement,
-    SetApplicationActivation(Application, ApplicationActivation),
+    SetApplicationActivation(Application, Activation),
     Run,
     ScanData,
+    SetMeanFilter(Activation, usize),
+    SetMedianFilter(Activation),
 }
 
 impl Request {
@@ -282,8 +317,8 @@ impl Request {
                         Application::Ranging => "RANG",
                     },
                     match activation {
-                        ApplicationActivation::Disabled => "0",
-                        ApplicationActivation::Enabled => "1",
+                        Activation::Disabled => "0",
+                        Activation::Enabled => "1",
                     }
                 )
                 .unwrap();
@@ -291,23 +326,50 @@ impl Request {
             }
             Request::Run => socket.write_all(b"\x02sMN Run\x03").unwrap(),
             Request::ScanData => socket.write_all(b"\x02sRN LMDscandata\x03").unwrap(),
+            Request::SetMeanFilter(activation, size) => {
+                let mut request = vec![];
+                write!(
+                    request,
+                    "\x02sWN LFPmeanfilter {} {} 0\x03",
+                    match activation {
+                        Activation::Disabled => "0",
+                        Activation::Enabled => "1",
+                    },
+                    size
+                )
+                .unwrap();
+                socket.write_all(&request).unwrap()
+            }
+            Request::SetMedianFilter(activation) => {
+                let mut request = vec![];
+                write!(
+                    request,
+                    "\x02sWN LFPmedianfilter {} 3\x03",
+                    match activation {
+                        Activation::Disabled => "0",
+                        Activation::Enabled => "1",
+                    },
+                )
+                .unwrap();
+                socket.write_all(&request).unwrap()
+            }
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Application {
     Field,
     Ranging,
 }
 
-#[derive(Debug)]
-enum ApplicationActivation {
+#[derive(Clone, Debug)]
+enum Activation {
     Enabled,
     Disabled,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Response {
     DeviceState(DeviceState),
     SetAccessMode(SetAccessModeResult),
@@ -316,34 +378,36 @@ enum Response {
     SetActiveApplications,
     Run(RunResult),
     ScanData { values: Vec<usize> },
+    SetMeanFilter,
+    SetMedianFilter,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum DeviceState {
     Busy,
     Ready,
     Error,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum SetAccessModeResult {
     Error,
     Success,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum StartMeasurementResult {
     Success,
     NotAllowed,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum StopMeasurementResult {
     Success,
     NotAllowed,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum RunResult {
     Error,
     Success,
